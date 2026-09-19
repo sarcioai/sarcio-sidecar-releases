@@ -1,0 +1,57 @@
+name: publish
+
+# Turns a branch named incoming/<version> into the release <version>, then
+# deletes the branch. Nothing is published unless its SHA256SUMS carries
+# Sarcio's signature and every file matches it.
+on:
+  push:
+    branches: ['incoming/**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: ${{ github.ref_name }}
+      PUBLIC_KEY: RWT/8gXBswXCZXMhfResaZIVGcwEjR/89MHEoYpo0C5ejHNUVTWiddoD
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the files
+        run: |
+          tag="${BRANCH#incoming/}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$tag' is not a version"
+            exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          cd files
+          minisign -Vm SHA256SUMS -P "$PUBLIC_KEY"
+          sha256sum --check --strict SHA256SUMS
+          # Everything except the checksums, their signature and the licence
+          # has to be listed in SHA256SUMS, the installer included.
+          for file in *; do
+            case "$file" in SHA256SUMS | SHA256SUMS.minisig | LICENSE) continue ;; esac
+            grep -q " $file\$" SHA256SUMS || { echo "::error::$file is not covered by SHA256SUMS"; exit 1; }
+          done
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" files/* --target main \
+            --title "Sarcio sidecar $TAG" \
+            --notes "Install guide: https://www.sarcio.io/docs#sidecar
+
+          Verify a download against \`SHA256SUMS\` and its signature before you run it; see the README."
+
+      - name: Remove the hand-off branch
+        if: always()
+        run: git push origin --delete "$BRANCH"
